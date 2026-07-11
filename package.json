@@ -4,7 +4,7 @@
   "description": "Diviqra Guard GitHub Action for LLM prompt scanning",
   "main": "dist/index.js",
   "scripts": {
-    "build": "esbuild src/index.ts --bundle --platform=node --target=node20 --outfile=dist/index.js --external:@actions/core",
+    "build": "npx esbuild src/index.ts --bundle --platform=node --target=node20 --outfile=dist/index.js --external:@actions/core",
     "dev": "ts-node src/index.ts"
   },
   "dependencies": {
