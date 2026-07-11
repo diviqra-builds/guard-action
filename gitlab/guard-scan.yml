@@ -1,0 +1,208 @@
+##
+# Diviqra Guard — GitLab CI Component
+# Scan LLM prompt files for injection attacks before deployment
+#
+# Usage in your .gitlab-ci.yml:
+#
+#   include:
+#     - component: gitlab.com/diviqra-builds/guard-action/guard-scan@v1
+#       inputs:
+#         api_key: $GUARD_API_KEY
+#         scan_path: ./prompts/
+#         fail_on: block
+#
+# Docs: https://guard.diviqra.com/docs/cicd
+##
+
+spec:
+  inputs:
+    api_key:
+      description: 'Diviqra Guard API key (dg_dev_*, dg_pro_*, dg_ent_*)'
+      type: string
+    scan_path:
+      description: 'Path to directory or file containing prompts to scan'
+      type: string
+      default: './prompts'
+    fail_on:
+      description: 'Fail pipeline on: block, warn, or never'
+      type: string
+      default: 'block'
+    context:
+      description: 'Scan context: agent_prompt, user_input, or system_prompt'
+      type: string
+      default: 'agent_prompt'
+    stage:
+      description: 'CI stage to run in'
+      type: string
+      default: 'test'
+    base_url:
+      description: 'Guard API base URL (override for self-hosted)'
+      type: string
+      default: 'https://api.diviqra.com'
+
+---
+
+diviqra-guard-scan:
+  stage: $[[ inputs.stage ]]
+  image: node:20-slim
+  variables:
+    GUARD_API_KEY: $[[ inputs.api_key ]]
+    GUARD_SCAN_PATH: $[[ inputs.scan_path ]]
+    GUARD_FAIL_ON: $[[ inputs.fail_on ]]
+    GUARD_CONTEXT: $[[ inputs.context ]]
+    GUARD_BASE_URL: $[[ inputs.base_url ]]
+  script:
+    - |
+      node - << 'EOF'
+      const fs   = require('fs')
+      const path = require('path')
+      const https = require('https')
+      const http  = require('http')
+
+      const API_KEY   = process.env.GUARD_API_KEY
+      const SCAN_PATH = process.env.GUARD_SCAN_PATH  || './prompts'
+      const FAIL_ON   = process.env.GUARD_FAIL_ON    || 'block'
+      const CONTEXT   = process.env.GUARD_CONTEXT    || 'agent_prompt'
+      const BASE_URL  = process.env.GUARD_BASE_URL   || 'https://api.diviqra.com'
+
+      if (!API_KEY) { console.error('GUARD_API_KEY is required'); process.exit(1) }
+
+      const EXTS = new Set(['.txt', '.json', '.yaml', '.yml', '.md'])
+
+      function getFiles(p) {
+        if (!fs.existsSync(p)) return []
+        const s = fs.statSync(p)
+        if (s.isFile()) return EXTS.has(path.extname(p)) ? [p] : []
+        const files = []
+        function walk(d) {
+          for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+            const full = path.join(d, e.name)
+            if (e.isDirectory()) { walk(full); continue }
+            if (EXTS.has(path.extname(e.name))) files.push(full)
+          }
+        }
+        walk(p)
+        return files
+      }
+
+      function extractTexts(filePath) {
+        const ext     = path.extname(filePath).toLowerCase()
+        const content = fs.readFileSync(filePath, 'utf-8')
+        if (ext === '.json') {
+          try {
+            const parsed = JSON.parse(content)
+            const texts  = []
+            const KEYS   = new Set(['text','content','prompt','message','input','query'])
+            function dig(v) {
+              if (typeof v === 'string' && v.trim()) { texts.push(v); return }
+              if (Array.isArray(v)) { v.forEach(dig); return }
+              if (v && typeof v === 'object') {
+                for (const [k, val] of Object.entries(v)) {
+                  if (KEYS.has(k)) dig(val)
+                }
+              }
+            }
+            dig(parsed)
+            return texts
+          } catch { return [content] }
+        }
+        if (ext === '.yaml' || ext === '.yml') {
+          return content.split('\n')
+            .filter(l => l.includes(':'))
+            .map(l => l.split(':').slice(1).join(':').trim())
+            .filter(t => t.length > 10)
+        }
+        return [content.trim()].filter(Boolean)
+      }
+
+      function postJson(url, body, apiKey) {
+        return new Promise((resolve, reject) => {
+          const u       = new URL(url)
+          const lib     = u.protocol === 'https:' ? https : http
+          const data    = JSON.stringify(body)
+          const options = {
+            hostname: u.hostname,
+            port:     u.port || (u.protocol === 'https:' ? 443 : 80),
+            path:     u.pathname,
+            method:   'POST',
+            headers:  {
+              'Content-Type':   'application/json',
+              'Content-Length': Buffer.byteLength(data),
+              'Authorization':  `Bearer ${apiKey}`,
+            },
+          }
+          const req = lib.request(options, res => {
+            let raw = ''
+            res.on('data', c => { raw += c })
+            res.on('end', () => {
+              if (res.statusCode >= 200 && res.statusCode < 300) {
+                try { resolve(JSON.parse(raw)) } catch { reject(new Error('Invalid JSON response')) }
+              } else {
+                reject(new Error(`HTTP ${res.statusCode}: ${raw}`))
+              }
+            })
+          })
+          req.on('error', reject)
+          req.write(data)
+          req.end()
+        })
+      }
+
+      async function main() {
+        const files = getFiles(SCAN_PATH)
+        if (files.length === 0) {
+          console.log('No prompt files found — skipping Guard scan')
+          process.exit(0)
+        }
+
+        console.log(`\nDiviqra Guard — scanning ${files.length} file(s)`)
+        console.log(`Context: ${CONTEXT} | Fail on: ${FAIL_ON}`)
+        console.log('─'.repeat(60))
+
+        let blocked = 0, warned = 0, clean = 0
+
+        for (const file of files) {
+          const texts = extractTexts(file)
+          for (const text of texts) {
+            try {
+              const result = await postJson(`${BASE_URL}/v1/scan`, { text, context: CONTEXT, direction: 'ingress' }, API_KEY)
+              const preview = text.slice(0, 55).replace(/\n/g, ' ')
+              if (result.blocked) {
+                blocked++
+                console.error(`✗ BLOCK [${path.basename(file)}] ${preview}…`)
+                if (result.threat) console.error(`       Threat: ${result.threat} | Score: ${result.score}`)
+              } else if (result.score > 0.3) {
+                warned++
+                console.warn(`⚠ WARN  [${path.basename(file)}] ${preview}…`)
+              } else {
+                clean++
+                console.log(`✓ SAFE  [${path.basename(file)}] ${preview}…`)
+              }
+            } catch (err) {
+              console.warn(`  scan error for ${file}: ${err.message}`)
+            }
+          }
+        }
+
+        console.log('─'.repeat(60))
+        console.log(`Files: ${files.length} | Blocked: ${blocked} | Warned: ${warned} | Clean: ${clean}`)
+
+        if (FAIL_ON === 'block' && blocked > 0) {
+          console.error(`\nGuard blocked ${blocked} prompt(s). Fix injections before deploying.`)
+          process.exit(1)
+        }
+        if (FAIL_ON === 'warn' && (blocked + warned) > 0) {
+          console.error(`\nGuard flagged ${blocked + warned} prompt(s). Review before deploying.`)
+          process.exit(1)
+        }
+
+        console.log('\nAll prompts passed Guard scan.')
+      }
+
+      main().catch(err => { console.error(err); process.exit(1) })
+      EOF
+  artifacts:
+    reports:
+      dotenv: guard-results.env
+    when: always
+  allow_failure: false
