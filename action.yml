@@ -1,0 +1,42 @@
+name: 'Diviqra Guard — LLM Prompt Scanner'
+description: 'Scan LLM prompts for injection attacks before deployment. Catches prompt injection, jailbreaks, PII leakage.'
+author: 'Diviqra Technologies'
+
+branding:
+  icon: 'shield'
+  color: 'blue'
+
+inputs:
+  api_key:
+    description: 'Diviqra Guard API key (dg_dev_... or dg_pro_...)'
+    required: true
+  scan_path:
+    description: 'Path to directory or file containing prompts to scan'
+    required: false
+    default: './prompts'
+  fail_on:
+    description: 'When to fail the pipeline: block | warn | never'
+    required: false
+    default: 'block'
+  context:
+    description: 'Scan context: agent_prompt | user_input | system_prompt'
+    required: false
+    default: 'agent_prompt'
+  base_url:
+    description: 'Guard API base URL (override for self-hosted)'
+    required: false
+    default: 'https://api.diviqra.com'
+
+outputs:
+  threats_found:
+    description: 'Total number of threats detected'
+  blocked_count:
+    description: 'Number of prompts blocked'
+  warned_count:
+    description: 'Number of prompts that triggered warnings'
+  scan_id:
+    description: 'Unique scan run ID for reference'
+
+runs:
+  using: 'node20'
+  main: 'dist/index.js'
