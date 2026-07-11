@@ -1,4 +1,4 @@
-name: 'Diviqra Guard — LLM Prompt Scanner'
+name: 'Diviqra Guard LLM Prompt Scanner'
 description: 'Scan LLM prompts for injection attacks before deployment. Catches prompt injection, jailbreaks, PII leakage.'
 author: 'Diviqra Technologies'
 
